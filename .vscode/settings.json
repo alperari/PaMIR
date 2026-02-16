@@ -1,0 +1,44 @@
+{
+  // Enable format on save for regular files
+  "editor.formatOnSave": true,
+
+  // Enable format on save for notebooks
+  "notebook.formatOnSave.enabled": true,
+
+  // Format on save for specific languages
+  "[python]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+
+  "[jupyter]": {
+    "editor.formatOnSave": true
+  },
+
+  // Python formatter configuration
+  // Options: "autopep8", "black", "yapf"
+  "python.formatting.provider": "autopep8",
+
+  // Autopep8 arguments (customize as needed)
+  "python.formatting.autopep8Args": [
+    "--max-line-length=120",
+    "--aggressive",
+    "--aggressive"
+  ],
+
+  // Alternative: Use Black formatter (uncomment if preferred)
+  // "python.formatting.provider": "black",
+  // "python.formatting.blackArgs": [
+  //     "--line-length=120"
+  // ],
+
+  // Notebook cell formatting
+  "notebook.codeActionsOnSave": {
+    "notebook.source.organizeImports": "explicit"
+  },
+
+  // Auto-save configuration (optional)
+  "files.autoSave": "onFocusChange"
+}

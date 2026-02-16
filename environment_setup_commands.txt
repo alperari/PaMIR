@@ -1,0 +1,15 @@
+### Install Conda
+cd ~
+curl -L -o miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash miniconda.sh -b -p "$HOME/miniconda3"
+
+"$HOME/miniconda3/bin/conda" init bash
+source ~/.bashrc
+conda --version
+
+
+### Create Python 3.8 env
+conda create -n pamir-py38 python=3.8
+conda activate pamir-py38
+
+TBD

@@ -45,7 +45,8 @@ class Evaluator(object):
         self.smpl_param_regressor = SMPLParamRegressor().to(self.device)
 
         # neural voxelization components
-        self.smpl = SMPL('./data/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl').to(self.device)
+        self.smpl = SMPL(
+            './data/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl').to(self.device)
         self.tet_smpl = TetraSMPL('./data/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl',
                                   './data/tetra_smpl.npz').to(self.device)
         smpl_vertex_code, smpl_face_code, smpl_faces, smpl_tetras = \
@@ -74,7 +75,8 @@ class Evaluator(object):
             checkpoint = torch.load(checkpoint_file)
             for model in self.models_dict:
                 if model in checkpoint:
-                    logging.info('Loading %s from %s' % (model, checkpoint_file))
+                    logging.info('Loading %s from %s' %
+                                 (model, checkpoint_file))
                     self.models_dict[model].load_state_dict(checkpoint[model])
 
     def load_pretrained_gcmr(self, model_path):
@@ -95,11 +97,12 @@ class Evaluator(object):
 
         # gcmr body prediction
         pred_cam, pred_rotmat, pred_betas, pred_vert_sub, \
-        pred_vert, pred_vert_tetsmpl = self.forward_gcmr(img)
+            pred_vert, pred_vert_tetsmpl = self.forward_gcmr(img)
 
         # camera coordinate conversion
         cam_f, cam_tz, cam_c = const.cam_f, const.cam_tz, const.cam_c
-        scale_, trans_ = self.forward_coordinate_conversion(cam_f, cam_tz, cam_c, pred_cam)
+        scale_, trans_ = self.forward_coordinate_conversion(
+            cam_f, cam_tz, cam_c, pred_cam)
         return pred_betas, pred_rotmat, scale_, trans_, pred_vert_tetsmpl[:, :6890]
 
     def test_pifu(self, img, vol_res, betas, pose, scale, trans):
@@ -109,8 +112,10 @@ class Evaluator(object):
         gt_vert_cam = scale * self.tet_smpl(pose, betas) + trans
         vol = self.voxelization(gt_vert_cam)
         group_size = 512 * 80
-        grid_ov = self.forward_infer_occupancy_value_grid_octree(img, vol, vol_res, group_size)
-        vertices, simplices, normals, _ = measure.marching_cubes_lewiner(grid_ov, 0.5)
+        grid_ov = self.forward_infer_occupancy_value_grid_octree(
+            img, vol, vol_res, group_size)
+        vertices, simplices, normals, _ = measure.marching_cubes(
+            grid_ov, level=0.5)
 
         mesh = dict()
         mesh['v'] = vertices / vol_res - 0.5
@@ -123,7 +128,8 @@ class Evaluator(object):
         self.pamir_net.eval()
         cam_f, cam_tz, cam_c = const.cam_f, const.cam_tz, const.cam_c
         cam_r = torch.tensor([1, -1, -1], dtype=torch.float32).to(self.device)
-        cam_t = torch.tensor([0, 0, cam_tz], dtype=torch.float32).to(self.device)
+        cam_t = torch.tensor(
+            [0, 0, cam_tz], dtype=torch.float32).to(self.device)
         kp_conf = keypoint[:, :, -1:].clone()
         kp_detection = keypoint[:, :, :-1].clone()
 
@@ -147,7 +153,8 @@ class Evaluator(object):
         vert_tetsmpl_cam = scale * vert_tetsmpl + trans
         keypoint = self.smpl.get_joints(vert_tetsmpl_cam[:, :6890])
         for i in tqdm(range(iter_num), desc='Body Fitting Optimization'):
-            theta_new_ = torch.cat([theta_orig[:, :3], theta_new[:, 3:]], dim=1)
+            theta_new_ = torch.cat(
+                [theta_orig[:, :3], theta_new[:, 3:]], dim=1)
             vert_tetsmpl_new = self.tet_smpl(theta_new_, betas_new)
             vert_tetsmpl_new_cam = scale * vert_tetsmpl_new + trans
             keypoint_new = self.smpl.get_joints(vert_tetsmpl_new_cam[:, :6890])
@@ -157,17 +164,21 @@ class Evaluator(object):
             if i % 20 == 0:
                 vol = self.voxelization(vert_tetsmpl_new_cam.detach())
 
-            pred_vert_new_cam = self.graph_mesh.downsample(vert_tetsmpl_new_cam[:, :6890], n2=1)
+            pred_vert_new_cam = self.graph_mesh.downsample(
+                vert_tetsmpl_new_cam[:, :6890], n2=1)
             pred_vert_new_proj = self.forward_point_sample_projection(
                 pred_vert_new_cam, cam_r, cam_t, cam_f, cam_c)
             smpl_sdf = self.forward_infer_occupancy_value(
                 img, pred_vert_new_cam, pred_vert_new_proj, vol)
 
-            loss_fitting = torch.mean(torch.abs(F.leaky_relu(0.5 - smpl_sdf, negative_slope=0.5)))
+            loss_fitting = torch.mean(
+                torch.abs(F.leaky_relu(0.5 - smpl_sdf, negative_slope=0.5)))
             loss_bias = torch.mean((theta_orig - theta_new) ** 2) + \
-                        torch.mean((betas_orig - betas_new) ** 2) * 0.01
-            loss_kp = torch.mean((kp_conf * keypoint_new_proj - kp_conf * kp_detection) ** 2)
-            loss_bias2 = torch.mean((keypoint[:, :, 2] - keypoint_new[:, :, 2]) ** 2)
+                torch.mean((betas_orig - betas_new) ** 2) * 0.01
+            loss_kp = torch.mean(
+                (kp_conf * keypoint_new_proj - kp_conf * kp_detection) ** 2)
+            loss_bias2 = torch.mean(
+                (keypoint[:, :, 2] - keypoint_new[:, :, 2]) ** 2)
 
             loss = loss_fitting * 1.0 + loss_bias * 1.0 + loss_kp * 500.0 + loss_bias2 * 5
 
@@ -194,8 +205,10 @@ class Evaluator(object):
         pts = np.concatenate([xv, yv, zv], axis=-1)
         pts = np.float32(pts)
         pts_proj = np.dot(pts, cam_R.transpose()) + cam_t
-        pts_proj[:, 0] = pts_proj[:, 0] * cam_f / pts_proj[:, 2] / (img_res / 2)
-        pts_proj[:, 1] = pts_proj[:, 1] * cam_f / pts_proj[:, 2] / (img_res / 2)
+        pts_proj[:, 0] = pts_proj[:, 0] * \
+            cam_f / pts_proj[:, 2] / (img_res / 2)
+        pts_proj[:, 1] = pts_proj[:, 1] * \
+            cam_f / pts_proj[:, 2] / (img_res / 2)
         pts_proj = pts_proj[:, :2]
 
         return pts, pts_proj
@@ -208,12 +221,13 @@ class Evaluator(object):
         pred_vert_sub = pred_vert_sub.transpose(1, 2)
         pred_vert = self.graph_mesh.upsample(pred_vert_sub)
         x = torch.cat(
-            [pred_vert_sub, self.graph_mesh.ref_vertices[None, :, :].expand(batch_size, -1, -1)],
+            [pred_vert_sub, self.graph_mesh.ref_vertices[None,
+                                                         :, :].expand(batch_size, -1, -1)],
             dim=-1)
         pred_rotmat, pred_betas = self.smpl_param_regressor(x)
         pred_vert_tetsmpl = self.tet_smpl(pred_rotmat, pred_betas)
         return pred_cam, pred_rotmat, pred_betas, pred_vert_sub, \
-               pred_vert, pred_vert_tetsmpl
+            pred_vert, pred_vert_tetsmpl
 
     def forward_keypoint_projection(self, smpl_vert, cam):
         pred_keypoints = self.smpl.get_joints(smpl_vert)
@@ -224,11 +238,15 @@ class Evaluator(object):
         # calculates camera parameters
         with torch.no_grad():
             scale = pred_cam[:, 0:1] * cam_c * cam_tz / cam_f
-            trans_x = pred_cam[:, 1:2] * cam_c * cam_tz * pred_cam[:, 0:1] / cam_f
-            trans_y = -pred_cam[:, 2:3] * cam_c * cam_tz * pred_cam[:, 0:1] / cam_f
+            trans_x = pred_cam[:, 1:2] * cam_c * \
+                cam_tz * pred_cam[:, 0:1] / cam_f
+            trans_y = -pred_cam[:, 2:3] * cam_c * \
+                cam_tz * pred_cam[:, 0:1] / cam_f
             trans_z = torch.zeros_like(trans_x)
-            scale_ = torch.cat([scale, -scale, -scale], dim=-1).detach().view((-1, 1, 3))
-            trans_ = torch.cat([trans_x, trans_y, trans_z], dim=-1).detach().view((-1, 1, 3))
+            scale_ = torch.cat([scale, -scale, -scale],
+                               dim=-1).detach().view((-1, 1, 3))
+            trans_ = torch.cat([trans_x, trans_y, trans_z],
+                               dim=-1).detach().view((-1, 1, 3))
 
         return scale_, trans_
 
@@ -241,12 +259,13 @@ class Evaluator(object):
     def forward_infer_occupancy_value_grid_naive(self, img, vol, test_res, group_size):
         pts, pts_proj = self.generate_point_grids(
             test_res, const.cam_R, const.cam_t, const.cam_f, img.size(2))
-        pts_ov = self.forward_infer_occupancy_value_group(img, vol, pts, pts_proj, group_size)
+        pts_ov = self.forward_infer_occupancy_value_group(
+            img, vol, pts, pts_proj, group_size)
         pts_ov = pts_ov.reshape([test_res, test_res, test_res])
         return pts_ov
 
     def forward_infer_occupancy_value_grid_octree(self, img, vol, test_res, group_size,
-                                             init_res=64, ignore_thres=0.05):
+                                                  init_res=64, ignore_thres=0.05):
         pts, pts_proj = self.generate_point_grids(
             test_res, const.cam_R, const.cam_t, const.cam_f, img.size(2))
         pts = np.reshape(pts, (test_res, test_res, test_res, 3))
@@ -287,7 +306,8 @@ class Evaluator(object):
                         v_max = v.max()
                         # this cell is all the same
                         if (v_max - v_min) < ignore_thres:
-                            pts_ov[x:x + reso, y:y + reso, z:z + reso] = (v_max + v_min) / 2
+                            pts_ov[x:x + reso, y:y + reso,
+                                   z:z + reso] = (v_max + v_min) / 2
                             dirty[x:x + reso, y:y + reso, z:z + reso] = False
             reso //= 2
         return pts_ov
@@ -304,7 +324,8 @@ class Evaluator(object):
         for gi in tqdm(range(pts_group_num), desc='SDF query'):
             # print('Testing point group: %d/%d' % (gi + 1, pts_group_num))
             pts_group = pts[:, (gi * group_size):((gi + 1) * group_size), :]
-            pts_proj_group = pts_proj[:, (gi * group_size):((gi + 1) * group_size), :]
+            pts_proj_group = pts_proj[:,
+                                      (gi * group_size):((gi + 1) * group_size), :]
             outputs = self.forward_infer_occupancy_value(
                 img, pts_group, pts_proj_group, vol)
             pts_ov.append(np.squeeze(outputs.detach().cpu().numpy()))

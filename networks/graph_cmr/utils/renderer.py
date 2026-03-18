@@ -9,9 +9,17 @@ from __future__ import print_function
 import numpy as np
 import cv2
 
-from opendr.camera import ProjectPoints
-from opendr.renderer import ColoredRenderer, TexturedRenderer
-from opendr.lighting import LambertianPointLight
+try:
+    from opendr.camera import ProjectPoints
+    from opendr.renderer import ColoredRenderer, TexturedRenderer
+    from opendr.lighting import LambertianPointLight
+    HAS_OPENDR = True
+except Exception:
+    ProjectPoints = None
+    ColoredRenderer = None
+    TexturedRenderer = None
+    LambertianPointLight = None
+    HAS_OPENDR = False
 
 # Rotate the points by a specified angle.
 def rotateY(points, angle):

@@ -62,6 +62,18 @@ def parse_args():
         help="Threshold for person mask logits.",
     )
     parser.add_argument(
+        "--mask-kernel",
+        type=int,
+        default=5,
+        help="Kernel size for mask morphological refinement (odd integer recommended).",
+    )
+    parser.add_argument(
+        "--mask-dilate",
+        type=int,
+        default=1,
+        help="Extra dilation iterations to recover thin limbs/fingers.",
+    )
+    parser.add_argument(
         "--target-ratio",
         type=float,
         default=0.8,
@@ -147,6 +159,75 @@ def box_iou_xyxy(box_a, box_b):
     area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
     union = area_a + area_b - inter + 1e-6
     return inter / union
+
+
+def postprocess_person_mask(mask_u8, kernel_size=5, dilate_iter=1):
+    # Keep the largest connected person region and smooth boundaries.
+    if kernel_size < 1:
+        kernel_size = 1
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+
+    mask_bin = (mask_u8 > 0).astype(np.uint8)
+    num_labels, labels, stats, _ = cv.connectedComponentsWithStats(
+        mask_bin, connectivity=8)
+    if num_labels > 1:
+        largest_label = 1 + np.argmax(stats[1:, cv.CC_STAT_AREA])
+        mask_bin = (labels == largest_label).astype(np.uint8)
+
+    kernel = cv.getStructuringElement(
+        cv.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    mask_bin = cv.morphologyEx(mask_bin, cv.MORPH_CLOSE, kernel, iterations=1)
+    mask_bin = cv.morphologyEx(mask_bin, cv.MORPH_OPEN, kernel, iterations=1)
+    if dilate_iter > 0:
+        mask_bin = cv.dilate(mask_bin, kernel, iterations=dilate_iter)
+
+    return (mask_bin * 255).astype(np.uint8)
+
+
+def select_mask_instance(pred_mask, kp_box, keypoints, score_thres, mask_thres):
+    labels = pred_mask["labels"].detach().cpu().numpy()
+    scores = pred_mask["scores"].detach().cpu().numpy()
+    boxes = pred_mask["boxes"].detach().cpu().numpy().astype(np.float32)
+
+    valid_ids = np.where((labels == 1) & (scores >= score_thres))[0]
+    if valid_ids.size == 0:
+        valid_ids = np.where(labels == 1)[0]
+    if valid_ids.size == 0:
+        return None
+
+    kp_xy = keypoints[:, :2]
+    kp_conf = keypoints[:, 2]
+    strong_kp = kp_conf >= 0.2
+
+    best_id = int(valid_ids[0])
+    best_score = -1e9
+    for idx in valid_ids:
+        box = boxes[idx]
+        iou = box_iou_xyxy(kp_box, box)
+
+        # Keypoint-inside-box ratio helps pick the right person in crowded scenes.
+        if np.any(strong_kp):
+            x1, y1, x2, y2 = box
+            kp_in = (kp_xy[:, 0] >= x1) & (kp_xy[:, 0] <= x2) & \
+                    (kp_xy[:, 1] >= y1) & (kp_xy[:, 1] <= y2) & strong_kp
+            kp_ratio = float(np.sum(kp_in)) / float(np.sum(strong_kp))
+        else:
+            kp_ratio = 0.0
+
+        mask_prob = pred_mask["masks"][idx, 0].detach().cpu().numpy()
+        mask_bin = (mask_prob >= mask_thres)
+        mask_area = float(np.sum(mask_bin))
+        # Prefer reasonably sized masks, but not too dominant.
+        area_ratio = min(mask_area / (512.0 * 512.0), 0.6)
+
+        score = float(scores[idx]) + 0.8 * iou + \
+            1.2 * kp_ratio + 0.2 * area_ratio
+        if score > best_score:
+            best_score = score
+            best_id = int(idx)
+
+    return best_id
 
 
 def square_crop_with_padding(image, x1, y1, x2, y2, target_ratio=0.8, margin=0.05):
@@ -289,7 +370,7 @@ def draw_detection_visualization(image, bbox, keypoints, keypoint_score_thres, m
 
 
 def prepare_single_image(img_path, out_dir, kp_model, mask_model, device, score_thres, mask_thres,
-                         target_ratio, margin, vis_dir=None):
+                         target_ratio, margin, vis_dir=None, mask_kernel=5, mask_dilate=1):
     img_name = os.path.basename(img_path)
     stem, _ = os.path.splitext(img_name)
 
@@ -326,9 +407,11 @@ def prepare_single_image(img_path, out_dir, kp_model, mask_model, device, score_
         raise RuntimeError("No person keypoints after crop in %s" % img_path)
 
     pred_mask = run_detector(mask_model, crop_512, device)
-    mask_idx = select_best_person(pred_mask, score_thres)
 
     kp_box = pred_kp["boxes"][kp_idx].detach().cpu().numpy().astype(np.float32)
+
+    mask_idx = select_mask_instance(pred_mask, kp_box, pred_kp["keypoints"][kp_idx].detach().cpu().numpy(),
+                                    score_thres, mask_thres)
 
     if mask_idx is None:
         # Fallback rectangular mask from keypoint person box.
@@ -338,21 +421,14 @@ def prepare_single_image(img_path, out_dir, kp_model, mask_model, device, score_
         x2, y2 = min(511, x2), min(511, y2)
         person_mask[y1:y2 + 1, x1:x2 + 1] = 255
     else:
-        mask_boxes = pred_mask["boxes"].detach(
-        ).cpu().numpy().astype(np.float32)
-        labels = pred_mask["labels"].detach().cpu().numpy()
-        scores = pred_mask["scores"].detach().cpu().numpy()
-        valid_mask_ids = np.where((labels == 1) & (scores >= score_thres))[0]
-        if valid_mask_ids.size == 0:
-            valid_mask_ids = np.where(labels == 1)[0]
-
-        if valid_mask_ids.size > 0:
-            ious = [box_iou_xyxy(kp_box, mask_boxes[i])
-                    for i in valid_mask_ids]
-            mask_idx = int(valid_mask_ids[int(np.argmax(np.array(ious)))])
-
         mask_prob = pred_mask["masks"][mask_idx, 0].detach().cpu().numpy()
         person_mask = (mask_prob >= mask_thres).astype(np.uint8) * 255
+
+    person_mask = postprocess_person_mask(
+        person_mask,
+        kernel_size=mask_kernel,
+        dilate_iter=mask_dilate,
+    )
 
     # Keep only foreground over white background.
     mask_f = (person_mask.astype(np.float32) / 255.0)[:, :, None]
@@ -438,6 +514,8 @@ def main():
                 target_ratio=args.target_ratio,
                 margin=args.crop_margin,
                 vis_dir=vis_dir,
+                mask_kernel=args.mask_kernel,
+                mask_dilate=args.mask_dilate,
             )
             print("[OK] %d/%d %s" %
                   (i + 1, len(imgs), os.path.basename(out_img)))
@@ -459,16 +537,16 @@ def main():
         except Exception as exc:
             print("[WARN] Skip %s: %s" % (img_path, str(exc)))
 
-    print("[INFO] Running PaMIR geometry inference...")
-    main_test_wo_gt_smpl_with_optm(
-        args.work_dir,
-        args.work_dir,
-        pretrained_checkpoint=args.pretrained_geo,
-        pretrained_gcmr_checkpoint=args.pretrained_gcmr,
-        iternum=args.iternum,
-    )
+    # print("[INFO] Running PaMIR geometry inference...")
+    # main_test_wo_gt_smpl_with_optm(
+    #     args.work_dir,
+    #     args.work_dir,
+    #     pretrained_checkpoint=args.pretrained_geo,
+    #     pretrained_gcmr_checkpoint=args.pretrained_gcmr,
+    #     iternum=args.iternum,
+    # )
 
-    print("[DONE] Outputs are in: %s" % os.path.join(args.work_dir, "results"))
+    # print("[DONE] Outputs are in: %s" % os.path.join(args.work_dir, "results"))
 
 
 if __name__ == "__main__":

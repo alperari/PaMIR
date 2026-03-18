@@ -73,6 +73,16 @@ def parse_args():
         default=0.05,
         help="Extra crop margin ratio around the person bbox.",
     )
+    parser.add_argument(
+        "--save-vis",
+        action="store_true",
+        help="Save visualization images with detected bbox/keypoints/mask overlays.",
+    )
+    parser.add_argument(
+        "--vis-subdir",
+        default="vis",
+        help="Subdirectory under work-dir to store visualization overlays.",
+    )
     return parser.parse_args()
 
 
@@ -257,8 +267,29 @@ def run_detector(model, image_bgr, device):
     return pred
 
 
+def draw_detection_visualization(image, bbox, keypoints, keypoint_score_thres, mask=None):
+    vis = image.copy()
+
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    cv.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    for kp in keypoints:
+        x, y, conf = kp
+        if conf >= keypoint_score_thres:
+            # Draw a thick ring plus center dot so joints stay visible on varied backgrounds.
+            cv.circle(vis, (int(x), int(y)), 7, (0, 0, 255), 3)
+            cv.circle(vis, (int(x), int(y)), 2, (255, 255, 255), -1)
+
+    if mask is not None:
+        contours, _ = cv.findContours(
+            mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        cv.drawContours(vis, contours, -1, (255, 255, 0), 1)
+
+    return vis
+
+
 def prepare_single_image(img_path, out_dir, kp_model, mask_model, device, score_thres, mask_thres,
-                         target_ratio, margin):
+                         target_ratio, margin, vis_dir=None):
     img_name = os.path.basename(img_path)
     stem, _ = os.path.splitext(img_name)
 
@@ -273,6 +304,9 @@ def prepare_single_image(img_path, out_dir, kp_model, mask_model, device, score_
         raise RuntimeError("No person detected in %s" % img_path)
     box_raw = pred_kp_raw["boxes"][kp_idx_raw].detach(
     ).cpu().numpy().astype(np.float32)
+    kps_raw = pred_kp_raw["keypoints"][kp_idx_raw].detach(
+    ).cpu().numpy().astype(np.float32)
+    kps_raw[:, 2] = np.clip(kps_raw[:, 2], 0.0, 1.0)
 
     crop, _, _ = square_crop_with_padding(
         image,
@@ -340,7 +374,37 @@ def prepare_single_image(img_path, out_dir, kp_model, mask_model, device, score_
     cv.imwrite(out_mask, person_mask)
     save_openpose_json(body25, out_kpt)
 
-    return out_img, out_mask, out_kpt
+    out_vis = None
+    out_input_vis = None
+    if vis_dir is not None:
+        os.makedirs(vis_dir, exist_ok=True)
+        input_vis = draw_detection_visualization(
+            image,
+            box_raw,
+            kps_raw,
+            keypoint_score_thres=0.3,
+            mask=None,
+        )
+        out_input_vis = os.path.join(vis_dir, "%s_input_vis.png" % stem)
+        ok_input = cv.imwrite(out_input_vis, input_vis)
+        if not ok_input:
+            raise RuntimeError(
+                "Failed to save input visualization image: %s" % out_input_vis)
+
+        vis = draw_detection_visualization(
+            proc,
+            kp_box,
+            kps,
+            keypoint_score_thres=0.3,
+            mask=person_mask,
+        )
+        out_vis = os.path.join(vis_dir, "%s_vis.png" % stem)
+        ok = cv.imwrite(out_vis, vis)
+        if not ok:
+            raise RuntimeError(
+                "Failed to save visualization image: %s" % out_vis)
+
+    return out_img, out_mask, out_kpt, out_vis, out_input_vis
 
 
 def main():
@@ -355,10 +419,15 @@ def main():
 
     imgs = list_input_images(args.input)
     print("[INFO] Preparing %d image(s)..." % len(imgs))
+    vis_dir = os.path.join(
+        args.work_dir, args.vis_subdir) if args.save_vis else None
+    # Backward compatibility: if a previous run expects `vis/`, mirror to it.
+    vis_legacy_dir = os.path.join(
+        args.work_dir, "vis") if args.save_vis else None
 
     for i, img_path in enumerate(imgs):
         try:
-            out_img, out_mask, out_kpt = prepare_single_image(
+            out_img, out_mask, out_kpt, out_vis, out_input_vis = prepare_single_image(
                 img_path,
                 args.work_dir,
                 kp_model,
@@ -368,11 +437,25 @@ def main():
                 mask_thres=args.mask_thres,
                 target_ratio=args.target_ratio,
                 margin=args.crop_margin,
+                vis_dir=vis_dir,
             )
             print("[OK] %d/%d %s" %
                   (i + 1, len(imgs), os.path.basename(out_img)))
             print("     mask: %s" % os.path.basename(out_mask))
             print("     keypoints: %s" % os.path.basename(out_kpt))
+            if out_input_vis is not None:
+                print("     input vis: %s" % out_input_vis)
+            if out_vis is not None:
+                print("     processed vis: %s" % out_vis)
+                if vis_legacy_dir is not None and vis_legacy_dir != vis_dir:
+                    os.makedirs(vis_legacy_dir, exist_ok=True)
+                    legacy_path = os.path.join(
+                        vis_legacy_dir, os.path.basename(out_vis))
+                    cv.imwrite(legacy_path, cv.imread(out_vis))
+                    if out_input_vis is not None:
+                        legacy_input_path = os.path.join(
+                            vis_legacy_dir, os.path.basename(out_input_vis))
+                        cv.imwrite(legacy_input_path, cv.imread(out_input_vis))
         except Exception as exc:
             print("[WARN] Skip %s: %s" % (img_path, str(exc)))
 
@@ -383,14 +466,6 @@ def main():
         pretrained_checkpoint=args.pretrained_geo,
         pretrained_gcmr_checkpoint=args.pretrained_gcmr,
         iternum=args.iternum,
-    )
-
-    print("[INFO] Running PaMIR texture inference...")
-    main_test_texture(
-        args.work_dir,
-        args.work_dir,
-        pretrained_checkpoint_pamir=args.pretrained_geo,
-        pretrained_checkpoint_pamirtex=args.pretrained_tex,
     )
 
     print("[DONE] Outputs are in: %s" % os.path.join(args.work_dir, "results"))
